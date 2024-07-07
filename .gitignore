@@ -1,0 +1,7 @@
+.direnv/
+.cache/
+.envrc
+out/
+compile_commands.json
+result
+
