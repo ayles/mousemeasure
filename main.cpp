@@ -1,20 +1,25 @@
-#include <GL/gl.h>
+#include <GL/glew.h>
 #include <GLFW/glfw3.h>
 
-#include <atomic>
-#include <bits/chrono.h>
-#include <cstdint>
+
+#if defined(__linux__)
 #include <fcntl.h>
 #include <linux/uinput.h>
-#include <thread>
 #include <unistd.h>
+#elif _WIN32
+#include <Windows.h>
+#endif
 
-#include <deque>
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <cstdint>
 #include <cstring>
+#include <deque>
 #include <functional>
 #include <iostream>
 #include <memory>
-#include <chrono>
+#include <thread>
 
 #define ENSURE(x) if (!(x)) { std::cerr << __FILE__ << ":" << __LINE__ << std::endl; abort(); }
 
@@ -45,9 +50,11 @@ private:
 };
 
 
-class TLinuxCursor : public ICursor {
+#if defined(__linux__)
+
+class TCursor : public ICursor {
 public:
-    TLinuxCursor() {
+    TCursor() {
         uinput_setup uin;
         memset(&uin, 0, sizeof(uin));
         uin.id.bustype = BUS_USB;
@@ -69,7 +76,7 @@ public:
         ENSURE(ioctl(Fd_, UI_DEV_CREATE) == 0);
     }
 
-    ~TLinuxCursor() {
+    ~TCursor() {
         ioctl(Fd_, UI_DEV_DESTROY);
         close(Fd_);
     }
@@ -98,6 +105,23 @@ private:
     int Fd_;
 };
 
+#elif _WIN32
+
+class TCursor : public ICursor {
+public:
+    void Move(double dx, double dy) override {
+        INPUT event;
+        ZeroMemory(&event, sizeof(INPUT));
+        event.type = INPUT_MOUSE;
+        event.mi.dx = dx;
+        event.mi.dy = dy;
+        event.mi.dwFlags = MOUSEEVENTF_MOVE;
+        ENSURE(SendInput(1, &event, sizeof(INPUT)) == 1);
+    }
+};
+
+#endif
+
 
 class IKeyboard {
     friend class TWindow;
@@ -116,7 +140,7 @@ private:
 class TWindow {
 public:
     TWindow(GLFWwindow* window) {
-        Cursor_ = std::make_shared<TLinuxCursor>();
+        Cursor_ = std::make_shared<TCursor>();
         Keyboard_ = std::make_shared<IKeyboard>();
         glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
         glfwSetInputMode(window, GLFW_RAW_MOUSE_MOTION, GLFW_TRUE);
@@ -186,10 +210,13 @@ int main(int argc, const char** argv) {
             }
             t = std::thread([&]() {
                 auto cursor = w.GetCursor();
+                auto current = NowNs();
                 for (size_t i = 1; i < line.size(); ++i) {
                     auto& [x0, y0, t0] = line[i - 1];
                     auto& [x1, y1, t1] = line[i];
-                    std::this_thread::sleep_for(std::chrono::nanoseconds(t1 - t0));
+                    auto next = current + (t1 - t0);
+                    while (NowNs() < next) {}
+                    current = next;
                     cursor->Move(x1 - x0, y1 - y0);
                 }
                 rewind = false;
@@ -198,6 +225,9 @@ int main(int argc, const char** argv) {
     });
 
     glfwMakeContextCurrent(window);
+    glfwSwapInterval(0);
+
+    ENSURE(glewInit() == GLEW_OK);
 
     while (!glfwWindowShouldClose(window)) {
         int width, height;
