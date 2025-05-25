@@ -19,7 +19,25 @@
         pkgs = nixpkgs.legacyPackages.${system};
       in
       {
-        packages.default = pkgs.callPackage ./package.nix { };
+        packages.default = pkgs.stdenv.mkDerivation {
+          name = "mousemeasure";
+
+          src = self;
+
+          nativeBuildInputs = with pkgs; [
+            cmake
+            ninja
+            clang-tools
+          ];
+
+          buildInputs = with pkgs; [
+            glfw
+            glew
+            xorg.libSM
+            xorg.libX11
+            xorg.libXext
+          ];
+        };
 
         devShells.default = self.packages.${system}.default;
       }

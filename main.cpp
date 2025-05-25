@@ -13,6 +13,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <deque>
@@ -20,6 +21,7 @@
 #include <iostream>
 #include <memory>
 #include <thread>
+
 
 #define ENSURE(x) if (!(x)) { std::cerr << __FILE__ << ":" << __LINE__ << std::endl; abort(); }
 
@@ -31,13 +33,13 @@ public:
 
     virtual void Move(double dx, double dy) = 0;
 
-    void SetMoveCallback(std::function<void(double, double)> callback) {
+    void SetMoveCallback(std::function<void(double x, double y, double dx, double dy)> callback) {
         Callback_ = std::move(callback);
     }
 
 private:
     void OnMove(double x, double y) {
-        Callback_(x - X_, y - Y_);
+        Callback_(x, y, x - X_, y - Y_);
         X_ = x;
         Y_ = y;
     }
@@ -46,7 +48,7 @@ private:
     double X_ = 0.0;
     double Y_ = 0.0;
 
-    std::function<void(double, double)> Callback_;
+    std::function<void(double x, double y, double dx, double dy)> Callback_;
 };
 
 
@@ -142,9 +144,13 @@ public:
     TWindow(GLFWwindow* window) {
         Cursor_ = std::make_shared<TCursor>();
         Keyboard_ = std::make_shared<IKeyboard>();
-        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-        glfwSetInputMode(window, GLFW_RAW_MOUSE_MOTION, GLFW_TRUE);
+        //glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+        //glfwSetInputMode(window, GLFW_RAW_MOUSE_MOTION, GLFW_TRUE);
         glfwSetWindowUserPointer(window, this);
+        double x, y;
+        glfwGetCursorPos(window, &x, &y);
+        GetCursor()->X_ = x;
+        GetCursor()->Y_ = y;
         glfwSetCursorPosCallback(window, [](GLFWwindow* window, double x, double y) {
             static_cast<TWindow*>(glfwGetWindowUserPointer(window))->Cursor_->OnMove(x, y);
         });
@@ -166,18 +172,19 @@ private:
 };
 
 
-void DrawLine(const std::array<float, 3>& color, int width, int height, std::deque<std::tuple<double, double, uint64_t>> line) {
-    glColor3fv(color.data());
-    glBegin(GL_LINE_STRIP);
-    for (auto& point : line) {
-        auto& [x, y, t] = point;
-        glVertex2f((x / width) * 2 - 1, -((y / height) * 2 - 1));
-    }
-    glEnd();
-}
-
 inline uint64_t NowNs() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+void DrawLine(const std::array<float, 3>& color, int width, int height, double scalex, double scaley, const std::deque<std::tuple<double, double, uint64_t>>& line) {
+    glColor3fv(color.data());
+    glBegin(GL_LINE_STRIP);
+    for (size_t i = 0; i < line.size(); ++i) {
+        auto [x, y, t] = line[line.size() - i - 1];
+        glVertex2f((x * scalex / width) * 2 - 1, -((y * scaley / height) * 2 - 1));
+    }
+    glEnd();
+    glFlush();
 }
 
 using TLine = std::deque<std::tuple<double, double, uint64_t>>;
@@ -186,38 +193,73 @@ int main(int argc, const char** argv) {
     ENSURE(glfwInit() == GLFW_TRUE);
 
     GLFWwindow* window = glfwCreateWindow(1024, 1024, "Mouse Measure", nullptr, nullptr);
+    ENSURE(window);
+    glfwPollEvents();
     TWindow w(window);
 
-
-
-    TLine line(1000, {512, 512, NowNs()});
+    double x, y;
+    glfwGetCursorPos(window, &x, &y);
+    TLine line;
     TLine rewindLine;
-    std::atomic<bool> rewind;
 
-    w.GetCursor()->SetMoveCallback([&](double dx, double dy) {
-        auto& l = rewind ? rewindLine : line;
-        l.emplace_back(std::get<0>(l.back()) + dx, std::get<1>(l.back()) + dy, NowNs());
-        l.pop_front();
+    const size_t size = 10000;
+    w.GetCursor()->SetMoveCallback([&](double x, double y, double dx, double dy) {
+        line.emplace_back(x, y, NowNs());
+        if (line.size() > 1 && line.size() == rewindLine.size()) {
+            double tdev = 0.0;
+            double tvar = 0.0;
+            double distdev = 0.0;
+            double distvar = 0.0;
+            for (int i = 1; i < line.size(); ++i) {
+                auto [rx0, ry0, rt0] = rewindLine[i - 1];
+                auto [rx1, ry1, rt1] = rewindLine[i];
+                auto [x0, y0, t0] = line[i - 1];
+                auto [x1, y1, t1] = line[i];
+                double deltaMs = std::abs((double)(rt1 - rt0) - (double)(t1 - t0)) / 1000000.0;
+                tdev += deltaMs / line.size();
+                tvar += deltaMs * deltaMs / line.size();
+                double deltaDist = std::abs(
+                    std::sqrt((rx1 - rx0) * (rx1 - rx0) + (ry1 - ry0) * (ry1 - ry0)) -
+                    std::sqrt((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0))
+                );
+                distdev += deltaDist / line.size();
+                distvar += deltaDist * deltaDist / line.size();
+            }
+            std::cout << "Mean deviation time, ms: " << tdev << std::endl;
+            std::cout << "Std deviation time, ms: " << std::sqrt(tvar) << std::endl;
+            std::cout << "Mean deviation distance: " << distdev << std::endl;
+            std::cout << "Std deviation distance: " << std::sqrt(distvar) << std::endl;
+            std::cout << "Sample time, ms: " << ((std::get<2>(rewindLine.back()) - std::get<2>(rewindLine.front())) / 1000000.0) << std::endl;
+            std::cout << "Actual time, ms: " << ((std::get<2>(line.back()) - std::get<2>(line.front())) / 1000000.0) << std::endl;
+            std::cout << "Events count: " << line.size() << std::endl;
+        }
+        if (line.size() > size) {
+            line.pop_front();
+        }
     });
 
+    std::atomic<bool> rewind;
     std::thread t;
     w.GetKeyboard()->SetKeyCallback([&](int key, int, int action, int) {
-        if (key == GLFW_KEY_R && action == GLFW_PRESS && !rewind) {
-            rewind = true;
-            rewindLine = TLine(1000, line[0]);
+        bool b = false;
+        if (key == GLFW_KEY_R && action == GLFW_PRESS && rewind.compare_exchange_strong(b, true)) {
             if (t.joinable()) {
                 t.join();
             }
+            rewindLine = line;
+            line = TLine();
             t = std::thread([&]() {
                 auto cursor = w.GetCursor();
                 auto current = NowNs();
-                for (size_t i = 1; i < line.size(); ++i) {
-                    auto& [x0, y0, t0] = line[i - 1];
-                    auto& [x1, y1, t1] = line[i];
+                auto [x0, y0, t0] = rewindLine.back();
+                t0 = std::get<2>(rewindLine.front());
+                for (size_t i = 0; i < rewindLine.size(); ++i) {
+                    auto [x1, y1, t1] = rewindLine[i];
                     auto next = current + (t1 - t0);
                     while (NowNs() < next) {}
                     current = next;
                     cursor->Move(x1 - x0, y1 - y0);
+                    std::tie(x0, y0, t0) = std::tie(x1, y1, t1);
                 }
                 rewind = false;
             });
@@ -225,9 +267,10 @@ int main(int argc, const char** argv) {
     });
 
     glfwMakeContextCurrent(window);
-    glfwSwapInterval(0);
 
-    ENSURE(glewInit() == GLEW_OK);
+    glewInit();
+
+    glfwSwapInterval(0);
 
     while (!glfwWindowShouldClose(window)) {
         int width, height;
@@ -236,8 +279,10 @@ int main(int argc, const char** argv) {
         glViewport(0, 0, width, height);
         glClear(GL_COLOR_BUFFER_BIT);
 
-        DrawLine({ 1, 1, 1, }, width, height, line);
-        DrawLine({ 1, 0, 0, }, width, height, rewindLine);
+        float scalex, scaley;
+        glfwGetWindowContentScale(window, &scalex, &scaley);
+        DrawLine({ 1, 0, 0, }, width, height, scalex, scaley, rewindLine);
+        DrawLine({ 1, 1, 1, }, width, height, scalex, scaley, line);
 
         glfwSwapBuffers(window);
         glfwPollEvents();
